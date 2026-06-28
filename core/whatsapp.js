@@ -12,6 +12,8 @@ const AUDIO_EXTENSIONS = new Set(['.mp3', '.ogg', '.wav', '.m4a', '.aac', '.opus
 let client = null;
 let isReady = false;
 let isInitializing = false;
+let initStartedAt = null;
+let stage = 'disconnected';
 let skipNextReconnect = false;
 
 function buildClient() {
@@ -39,6 +41,8 @@ function scheduleReconnect() {
 async function initializeClient() {
   if (isInitializing || isReady) return;
   isInitializing = true;
+  initStartedAt = Date.now();
+  stage = 'initializing';
 
   if (client) {
     try { await client.destroy(); } catch { /* ignore */ }
@@ -46,13 +50,24 @@ async function initializeClient() {
   }
   client = buildClient();
 
+  client.on('loading_screen', () => {
+    stage = 'browser_starting';
+  });
+
   client.on('qr', (qr) => {
+    stage = 'qr_ready';
     eventBus.emit('whatsapp:qr', { qr });
+  });
+
+  client.on('authenticated', () => {
+    stage = 'connecting';
   });
 
   client.on('ready', () => {
     isReady = true;
     isInitializing = false;
+    initStartedAt = null;
+    stage = 'ready';
     const { wid, pushname } = client.info;
     eventBus.emit('whatsapp:ready', { phone: wid.user, name: pushname });
     console.log(`[whatsapp] ready — ${pushname} (${wid.user})`);
@@ -62,11 +77,13 @@ async function initializeClient() {
     console.error('[whatsapp] auth failure:', msg);
     isReady = false;
     isInitializing = false;
+    stage = 'disconnected';
   });
 
   client.on('disconnected', (reason) => {
     isReady = false;
     isInitializing = false;
+    stage = 'disconnected';
     eventBus.emit('whatsapp:disconnected', {});
     console.log('[whatsapp] disconnected:', reason);
     if (skipNextReconnect) {
@@ -89,6 +106,7 @@ async function disconnectClient() {
   skipNextReconnect = true;
   isReady = false;
   isInitializing = false;
+  stage = 'disconnected';
   if (client) {
     try { await client.destroy(); } catch { /* ignore */ }
     client = null;
@@ -136,6 +154,18 @@ function getIsReady() {
   return isReady;
 }
 
+function getIsInitializing() {
+  return isInitializing;
+}
+
+function getInitStartedAt() {
+  return initStartedAt;
+}
+
+function getStage() {
+  return stage;
+}
+
 initializeClient();
 
-module.exports = { getGroups, sendMessage, getClient, getIsReady, initializeClient, disconnectClient };
+module.exports = { getGroups, sendMessage, getClient, getIsReady, getIsInitializing, getInitStartedAt, getStage, initializeClient, disconnectClient };
