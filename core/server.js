@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
+const nodePath = require('path');
 const eventBus = require('./eventBus');
 const { loadPlugins } = require('./pluginLoader');
 
@@ -10,6 +10,12 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// Log every incoming request so we can see what Railway forwards
+app.use((req, res, next) => {
+  console.log(`[server] ${req.method} ${req.path}`);
+  next();
+});
 
 // Health check bypasses the visitor-event middleware
 app.use('/health', require('../api/health'));
@@ -33,19 +39,19 @@ const apiRoutes = [
   ['/api/version',    '../api/version'],
 ];
 
-for (const [path, mod] of apiRoutes) {
+for (const [routePath, mod] of apiRoutes) {
   try {
-    app.use(path, require(mod));
-    console.log(`[server] route registered: ${path}`);
+    app.use(routePath, require(mod));
+    console.log(`[server] route registered: ${routePath}`);
   } catch (err) {
-    console.error(`[server] FAILED to register ${path}: ${err.message}`);
+    console.error(`[server] FAILED to register ${routePath}: ${err.message}`);
   }
 }
 
 // Serve React frontend
-app.use(express.static(path.join(__dirname, '../frontend/dist')));
+app.use(express.static(nodePath.join(__dirname, '../frontend/dist')));
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
+  res.sendFile(nodePath.join(__dirname, '../frontend/dist/index.html'));
 });
 
 app.listen(PORT, () => {
