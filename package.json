@@ -8,7 +8,7 @@
     "dev": "concurrently \"node core/server.js\" \"cd frontend && npm run dev\"",
     "build": "cd frontend && npm run build",
     "test": "jest",
-    "prepare": "husky",
+    "prepare": "husky || true",
     "release": "standard-version",
     "release:patch": "standard-version --release-as patch",
     "release:minor": "standard-version --release-as minor",
