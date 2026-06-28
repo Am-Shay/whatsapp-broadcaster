@@ -115,7 +115,12 @@ async function disconnectClient() {
 
 async function getGroups() {
   if (!isReady) throw new Error('WhatsApp client not ready');
-  const chats = await client.getChats();
+
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('getChats timed out after 20s')), 20000)
+  );
+
+  const chats = await Promise.race([client.getChats(), timeout]);
   return chats
     .filter((c) => c.isGroup)
     .map((c) => ({ id: c.id._serialized, name: c.name }));
