@@ -24,12 +24,23 @@ app.use((req, res, next) => {
 });
 
 // API routes
-app.use('/api/qr', require('../api/qr'));
-app.use('/api/status', require('../api/status'));
-app.use('/api/groups', require('../api/groups'));
-app.use('/api/send', require('../api/send'));
-app.use('/api/disconnect', require('../api/disconnect'));
-app.use('/api/version', require('../api/version'));
+const apiRoutes = [
+  ['/api/qr',         '../api/qr'],
+  ['/api/status',     '../api/status'],
+  ['/api/groups',     '../api/groups'],
+  ['/api/send',       '../api/send'],
+  ['/api/disconnect', '../api/disconnect'],
+  ['/api/version',    '../api/version'],
+];
+
+for (const [path, mod] of apiRoutes) {
+  try {
+    app.use(path, require(mod));
+    console.log(`[server] route registered: ${path}`);
+  } catch (err) {
+    console.error(`[server] FAILED to register ${path}: ${err.message}`);
+  }
+}
 
 // Serve React frontend
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
