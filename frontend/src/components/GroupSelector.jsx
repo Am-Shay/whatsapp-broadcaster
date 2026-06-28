@@ -123,16 +123,25 @@ export default function GroupSelector({ selectedGroups, onChange, onGroupsLoaded
   async function fetchGroups() {
     setLoading(true);
     setError(null);
-    try {
-      const res = await fetch('/api/groups');
-      if (!res.ok) throw new Error(`Server ${res.status}`);
-      const data = await res.json();
-      setGroups(data);
-      onGroupsLoaded?.(data);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
+    // Retry up to 4 times with 3-second gaps — handles the brief window where
+    // whatsapp-web.js fires 'ready' before getChats() is usable.
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        const res = await fetch('/api/groups');
+        if (!res.ok) throw new Error(`Server ${res.status}`);
+        const data = await res.json();
+        setGroups(data);
+        onGroupsLoaded?.(data);
+        setLoading(false);
+        return;
+      } catch (err) {
+        if (attempt < 4) {
+          await new Promise((r) => setTimeout(r, 3000));
+        } else {
+          setError(err.message);
+          setLoading(false);
+        }
+      }
     }
   }
 
@@ -176,27 +185,34 @@ export default function GroupSelector({ selectedGroups, onChange, onGroupsLoaded
     onChange(new Set());
   }
 
-  const disabled = loading || !!error;
+  const disabled = loading;
 
   const triggerLabel = loading
     ? 'Loading groups…'
     : error
-    ? 'Failed to load groups'
+    ? 'Failed to load groups — click Retry'
     : selectedGroups.size === 0
     ? 'Select groups…'
     : `${selectedGroups.size} group${selectedGroups.size !== 1 ? 's' : ''} selected`;
 
   return (
     <div ref={rootRef} style={s.root}>
-      <button
-        type="button"
-        style={{ ...s.trigger, ...(disabled ? s.triggerDisabled : {}) }}
-        onClick={() => !disabled && setOpen((o) => !o)}
-        disabled={disabled}
-      >
-        <span>{triggerLabel}</span>
-        <span style={s.triggerArrow}>{open ? '▲' : '▼'}</span>
-      </button>
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <button
+          type="button"
+          style={{ ...s.trigger, ...(disabled ? s.triggerDisabled : {}), flex: 1 }}
+          onClick={() => !disabled && !error && setOpen((o) => !o)}
+          disabled={disabled}
+        >
+          <span>{triggerLabel}</span>
+          {!error && <span style={s.triggerArrow}>{open ? '▲' : '▼'}</span>}
+        </button>
+        {error && (
+          <button type="button" style={s.retryBtn} onClick={fetchGroups}>
+            Retry
+          </button>
+        )}
+      </div>
 
       {!loading && !error && (
         <div style={s.chipArea}>
