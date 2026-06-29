@@ -16,6 +16,12 @@ let initStartedAt = null;
 let stage = 'disconnected';
 let skipNextReconnect = false;
 
+// Groups cache — populated immediately when WhatsApp is ready, before Chrome
+// gets busy with background message sync. Served for all subsequent requests.
+let groupsCache = null;
+let groupsCacheTime = 0;
+const GROUPS_CACHE_TTL_MS = 5 * 60 * 1000; // refresh every 5 minutes
+
 function buildClient() {
   return new Client({
     authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
@@ -28,6 +34,14 @@ function buildClient() {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--disable-gpu',
+        '--no-zygote',
+        '--single-process',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-sync',
+        '--disable-renderer-backgrounding',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-ipc-flooding-protection',
       ],
     },
   });
@@ -36,6 +50,54 @@ function buildClient() {
 function scheduleReconnect() {
   console.log(`[whatsapp] reconnecting in ${RECONNECT_DELAY_MS}ms…`);
   setTimeout(initializeClient, RECONNECT_DELAY_MS);
+}
+
+// Fetches groups directly from the WhatsApp Web page store.
+// Returns an array of {id, name} or throws on timeout/error.
+async function fetchGroupsFromPage() {
+  const TIMEOUT_MS = 30000;
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`fetchGroups timed out after ${TIMEOUT_MS / 1000}s`)), TIMEOUT_MS)
+  );
+
+  // Try fast path: direct store evaluation (no full chat serialisation)
+  const result = await Promise.race([
+    client.pupPage.evaluate(() => {
+      try {
+        return window.Store.Chat.getModelsArray()
+          .filter(c => c.isGroup)
+          .map(c => ({ id: c.id._serialized, name: c.formattedTitle || c.name || '' }));
+      } catch (e) {
+        return { __error: e.message };
+      }
+    }),
+    timeout,
+  ]);
+
+  if (result && result.__error) {
+    // Store.Chat not available — fall back to the full getChats() path
+    console.warn('[whatsapp] Store.Chat unavailable, falling back to getChats():', result.__error);
+    const chats = await Promise.race([client.getChats(), timeout]);
+    return chats
+      .filter(c => c.isGroup)
+      .map(c => ({ id: c.id._serialized, name: c.name }));
+  }
+
+  return result;
+}
+
+// Pre-warms the groups cache right when WhatsApp is ready, before Chrome
+// starts the heavy background message sync that makes evaluations hang.
+async function warmGroupsCache() {
+  try {
+    console.log('[whatsapp] warming groups cache…');
+    const groups = await fetchGroupsFromPage();
+    groupsCache = groups;
+    groupsCacheTime = Date.now();
+    console.log(`[whatsapp] groups cache ready — ${groups.length} groups`);
+  } catch (err) {
+    console.error('[whatsapp] groups cache warm failed:', err.message);
+  }
 }
 
 async function initializeClient() {
@@ -71,6 +133,9 @@ async function initializeClient() {
     const { wid, pushname } = client.info;
     eventBus.emit('whatsapp:ready', { phone: wid.user, name: pushname });
     console.log(`[whatsapp] ready — ${pushname} (${wid.user})`);
+
+    // Warm the cache immediately — Chrome is idlest right at ready time
+    warmGroupsCache();
   });
 
   client.on('auth_failure', (msg) => {
@@ -84,6 +149,8 @@ async function initializeClient() {
     isReady = false;
     isInitializing = false;
     stage = 'disconnected';
+    groupsCache = null;
+    groupsCacheTime = 0;
     eventBus.emit('whatsapp:disconnected', {});
     console.log('[whatsapp] disconnected:', reason);
     if (skipNextReconnect) {
@@ -107,6 +174,8 @@ async function disconnectClient() {
   isReady = false;
   isInitializing = false;
   stage = 'disconnected';
+  groupsCache = null;
+  groupsCacheTime = 0;
   if (client) {
     try { await client.destroy(); } catch { /* ignore */ }
     client = null;
@@ -116,22 +185,15 @@ async function disconnectClient() {
 async function getGroups() {
   if (!isReady) throw new Error('WhatsApp client not ready');
 
-  // client.getChats() serialises every chat in full and hangs under load.
-  // Instead, evaluate directly in the page: filter to groups and extract only
-  // the two fields we need. Synchronous in the browser context — much faster.
-  const timeout = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error('getGroups timed out after 20s')), 20000)
-  );
+  // Serve from cache if fresh
+  if (groupsCache && Date.now() - groupsCacheTime < GROUPS_CACHE_TTL_MS) {
+    return groupsCache;
+  }
 
-  const groups = await Promise.race([
-    client.pupPage.evaluate(() =>
-      window.Store.Chat.getModelsArray()
-        .filter(c => c.isGroup)
-        .map(c => ({ id: c.id._serialized, name: c.formattedTitle || c.name || '' }))
-    ),
-    timeout,
-  ]);
-
+  // Cache miss or stale — fetch live and update cache
+  const groups = await fetchGroupsFromPage();
+  groupsCache = groups;
+  groupsCacheTime = Date.now();
   return groups;
 }
 
@@ -160,25 +222,11 @@ async function sendMessage(groupId, content, extraOpts = {}) {
   return client.sendMessage(groupId, media, extraOpts);
 }
 
-function getClient() {
-  return client;
-}
-
-function getIsReady() {
-  return isReady;
-}
-
-function getIsInitializing() {
-  return isInitializing;
-}
-
-function getInitStartedAt() {
-  return initStartedAt;
-}
-
-function getStage() {
-  return stage;
-}
+function getClient() { return client; }
+function getIsReady() { return isReady; }
+function getIsInitializing() { return isInitializing; }
+function getInitStartedAt() { return initStartedAt; }
+function getStage() { return stage; }
 
 initializeClient();
 
