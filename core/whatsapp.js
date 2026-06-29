@@ -20,7 +20,10 @@ let skipNextReconnect = false;
 // gets busy with background message sync. Served for all subsequent requests.
 let groupsCache = null;
 let groupsCacheTime = 0;
-const GROUPS_CACHE_TTL_MS = 5 * 60 * 1000; // refresh every 5 minutes
+const GROUPS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// Deduplicates concurrent getGroups() calls during a live fetch.
+let groupsFetchPromise = null;
 
 function buildClient() {
   return new Client({
@@ -44,38 +47,57 @@ function scheduleReconnect() {
   setTimeout(initializeClient, RECONNECT_DELAY_MS);
 }
 
-// Fetches groups directly from the WhatsApp Web page store.
-// Returns an array of {id, name} or throws on timeout/error.
+// Fetches groups by polling window.Store.Chat until it's available.
+// If Store never appears (injection failed), triggers a client reinit and throws.
 async function fetchGroupsFromPage() {
-  const TIMEOUT_MS = 30000;
-  const timeout = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error(`fetchGroups timed out after ${TIMEOUT_MS / 1000}s`)), TIMEOUT_MS)
-  );
+  const POLL_MS = 3000;
+  // If window.Store is still absent after this long, the inject() call failed.
+  const STORE_DEADLINE_MS = 15000;
+  const storeDeadline = Date.now() + STORE_DEADLINE_MS;
 
-  // Try fast path: direct store evaluation (no full chat serialisation)
-  const result = await Promise.race([
-    client.pupPage.evaluate(() => {
-      try {
-        return window.Store.Chat.getModelsArray()
-          .filter(c => c.isGroup)
-          .map(c => ({ id: c.id._serialized, name: c.formattedTitle || c.name || '' }));
-      } catch (e) {
-        return { __error: e.message };
-      }
-    }),
-    timeout,
-  ]);
+  while (true) {
+    let result;
+    try {
+      result = await client.pupPage.evaluate(() => {
+        if (!window.Store)      return { status: 'no_store' };
+        if (!window.Store.Chat) return { status: 'no_chat' };
+        try {
+          return window.Store.Chat.getModelsArray()
+            .filter(c => c.isGroup)
+            .map(c => ({ id: c.id._serialized, name: c.formattedTitle || c.name || '' }));
+        } catch (e) {
+          return { status: 'error', message: e.message };
+        }
+      });
+    } catch (evalErr) {
+      throw new Error(`page evaluate failed: ${evalErr.message}`);
+    }
 
-  if (result && result.__error) {
-    // Store.Chat not available — fall back to the full getChats() path
-    console.warn('[whatsapp] Store.Chat unavailable, falling back to getChats():', result.__error);
-    const chats = await Promise.race([client.getChats(), timeout]);
-    return chats
-      .filter(c => c.isGroup)
-      .map(c => ({ id: c.id._serialized, name: c.name }));
+    // Success — return the groups array (may be empty if no groups yet)
+    if (Array.isArray(result)) return result;
+
+    if (result.status === 'error') throw new Error(result.message);
+
+    // Store or Chat not initialised yet — check deadline then retry
+    if (Date.now() > storeDeadline) {
+      console.error('[whatsapp] window.Store unavailable after 15 s — injection failed, reinitialising');
+      // Async so this function can throw before the reinit starts
+      setImmediate(async () => {
+        if (isInitializing) return;
+        isReady = false;
+        isInitializing = false;
+        stage = 'disconnected';
+        groupsCache = null;
+        groupsCacheTime = 0;
+        if (client) { try { await client.destroy(); } catch {} client = null; }
+        scheduleReconnect();
+      });
+      throw new Error('WhatsApp injection failed — reinitialising client');
+    }
+
+    console.log(`[whatsapp] ${result.status} — retrying in ${POLL_MS / 1000}s`);
+    await new Promise(r => setTimeout(r, POLL_MS));
   }
-
-  return result;
 }
 
 // Pre-warms the groups cache right when WhatsApp is ready, before Chrome
@@ -177,16 +199,26 @@ async function disconnectClient() {
 async function getGroups() {
   if (!isReady) throw new Error('WhatsApp client not ready');
 
-  // Serve from cache if fresh
   if (groupsCache && Date.now() - groupsCacheTime < GROUPS_CACHE_TTL_MS) {
     return groupsCache;
   }
 
-  // Cache miss or stale — fetch live and update cache
-  const groups = await fetchGroupsFromPage();
-  groupsCache = groups;
-  groupsCacheTime = Date.now();
-  return groups;
+  // Deduplicate: if a live fetch is already running, share its promise
+  if (!groupsFetchPromise) {
+    groupsFetchPromise = fetchGroupsFromPage()
+      .then(groups => {
+        groupsCache = groups;
+        groupsCacheTime = Date.now();
+        groupsFetchPromise = null;
+        return groups;
+      })
+      .catch(err => {
+        groupsFetchPromise = null;
+        throw err;
+      });
+  }
+
+  return groupsFetchPromise;
 }
 
 async function sendMessage(groupId, content, extraOpts = {}) {
