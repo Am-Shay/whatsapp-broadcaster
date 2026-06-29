@@ -116,14 +116,23 @@ async function disconnectClient() {
 async function getGroups() {
   if (!isReady) throw new Error('WhatsApp client not ready');
 
+  // client.getChats() serialises every chat in full and hangs under load.
+  // Instead, evaluate directly in the page: filter to groups and extract only
+  // the two fields we need. Synchronous in the browser context — much faster.
   const timeout = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error('getChats timed out after 20s')), 20000)
+    setTimeout(() => reject(new Error('getGroups timed out after 20s')), 20000)
   );
 
-  const chats = await Promise.race([client.getChats(), timeout]);
-  return chats
-    .filter((c) => c.isGroup)
-    .map((c) => ({ id: c.id._serialized, name: c.name }));
+  const groups = await Promise.race([
+    client.pupPage.evaluate(() =>
+      window.Store.Chat.getModelsArray()
+        .filter(c => c.isGroup)
+        .map(c => ({ id: c.id._serialized, name: c.formattedTitle || c.name || '' }))
+    ),
+    timeout,
+  ]);
+
+  return groups;
 }
 
 async function sendMessage(groupId, content, extraOpts = {}) {
