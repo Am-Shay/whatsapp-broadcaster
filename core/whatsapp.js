@@ -34,8 +34,6 @@ function buildClient() {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--disable-gpu',
-        '--no-zygote',
-        '--single-process',
         '--disable-extensions',
         '--disable-background-networking',
         '--disable-sync',
