@@ -56,6 +56,8 @@ async function fetchGroupsFromPage() {
   const storeDeadline = Date.now() + STORE_DEADLINE_MS;
 
   while (true) {
+    if (!client) throw new Error('client was destroyed during fetch');
+
     let result;
     try {
       result = await client.pupPage.evaluate(() => {
@@ -102,12 +104,12 @@ async function fetchGroupsFromPage() {
 
 // Pre-warms the groups cache right when WhatsApp is ready, before Chrome
 // starts the heavy background message sync that makes evaluations hang.
+// Routed through getGroups() so it shares the deduplication promise with
+// any concurrent /api/groups requests — only one fetchGroupsFromPage runs.
 async function warmGroupsCache() {
   try {
     console.log('[whatsapp] warming groups cache…');
-    const groups = await fetchGroupsFromPage();
-    groupsCache = groups;
-    groupsCacheTime = Date.now();
+    const groups = await getGroups();
     console.log(`[whatsapp] groups cache ready — ${groups.length} groups`);
   } catch (err) {
     console.error('[whatsapp] groups cache warm failed:', err.message);
