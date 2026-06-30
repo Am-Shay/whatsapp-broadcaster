@@ -8,7 +8,7 @@ with a random delay between each send.
 ## Stack
 - **Runtime**: Node.js 20
 - **Framework**: Express (HTTP server + REST API)
-- **WhatsApp**: whatsapp-web.js (QR-based session, supports all media types)
+- **WhatsApp**: @whiskeysockets/baileys 6.7.23 (native WebSocket, no browser/Puppeteer needed)
 - **Frontend**: React (single page, served by Express)
 - **Session storage**: Local filesystem (Railway volume) for WhatsApp session persistence
 - **Hosting**: Railway
@@ -20,6 +20,16 @@ with a random delay between each send.
 3. To disable a feature: set `enabled: false` in `config/app.config.js`. Never delete plugin folders.
 4. Secrets go in `.env` only. Never hardcode tokens, emails, or keys.
 5. Update the "Active Plugins" section below whenever a plugin is added or removed.
+
+## Debugging Rules — READ BEFORE FIXING ANYTHING
+Before attempting any fix:
+1. Read ALL files in core/ and api/
+2. List every route registered in core/server.js
+3. List every file in api/ and check if it is mounted in server.js
+4. Report findings before touching any code
+5. Test the fix locally (npm start + http://localhost:3000) before pushing to Railway
+
+Never push a fix to Railway without verifying it works on localhost:3000 first.
 
 ## Folder Structure
 ```
@@ -58,11 +68,15 @@ whatsapp-broadcaster/
 │   │   │   ├── GroupSelector.jsx    ← searchable multi-select dropdown of groups
 │   │   │   ├── MessageComposer.jsx  ← text input + multi-file attach + voice recorder
 │   │   │   └── DelayPicker.jsx      ← min/max seconds slider
-│   │   └── index.js
+│   │   └── index.jsx
 │   └── dist/                        ← built output, served by Express
 │
 ├── config/
 │   └── app.config.js                ← feature flags + plugin registry (uses absolute paths)
+│
+├── scripts/
+│   ├── release.sh                   ← Mac/Linux release script
+│   └── release.bat                  ← Windows release script (npm run ship:win)
 │
 ├── tests/
 │   ├── core/
@@ -92,17 +106,17 @@ These events are emitted by core. Plugins listen to them — never the other way
 |---|---|---|
 | `GET` | `/health` | Always 200 if Express is up; returns `{status, whatsapp, timestamp}` |
 | `GET` | `/api/qr` | `{qr: "data:image/png;base64,…", connected: false}` or `{qr: null, connected: true}` |
-| `GET` | `/api/status` | `{connected: bool, phone?, name?}` |
+| `GET` | `/api/status` | `{connected: bool, stage, phone?, name?, uptimeSeconds}` |
 | `GET` | `/api/groups` | `[{id, name}]` — 503 if WhatsApp not ready |
 | `POST` | `/api/send` | See body schema below |
-| `POST` | `/api/disconnect` | Logs out the current WhatsApp session; client reconnects and shows a new QR |
-| `GET` | `/api/version` | `{version: "1.0.0"}` — reads from `package.json` |
+| `POST` | `/api/disconnect` | Logs out the current WhatsApp session |
+| `GET` | `/api/version` | `{version: "1.2.0"}` — reads from `package.json` |
 
 ### POST /api/send body
 ```json
 {
   "groupIds":  ["123@g.us"],
-  "message":   "optional text — sent as a separate message, not a caption",
+  "message":   "optional text",
   "minDelay":  0,
   "maxDelay":  0,
   "mediaItems": [
@@ -111,20 +125,14 @@ These events are emitted by core. Plugins listen to them — never the other way
   ]
 }
 ```
-- `mediaItems` is an array; each attachment is sent as its own separate WhatsApp message
-- Text (`message`) is also sent as its own message (not a caption on the first file)
-- Legacy `mediaBase64` (single object) still accepted for backward compatibility
-- Audio mimetypes (`audio/*`) are automatically sent as WhatsApp voice notes
-- Frontend sends **one group at a time** and controls the delay loop; backend receives `minDelay: 0, maxDelay: 0`
-- Returns `202 { ok: true, total: N }` immediately; sends are async in the background
 
 ## whatsapp.js Exports
 
 | Export | Signature | Notes |
 |---|---|---|
 | `getGroups()` | `async () → [{id, name}]` | Throws if not ready |
-| `sendMessage()` | `async (groupId, content, opts?) → Message` | content = string \| file path \| MessageMedia |
-| `getClient()` | `() → Client \| null` | Raw whatsapp-web.js client |
+| `sendMessage()` | `async (groupId, content, opts?) → Message` | content = string or MessageMedia |
+| `getClient()` | `() → Client or null` | Raw Baileys socket |
 | `getIsReady()` | `() → bool` | True after QR is scanned |
 
 ## Active Plugins
@@ -132,39 +140,35 @@ These events are emitted by core. Plugins listen to them — never the other way
 |---|---|---|
 | `visitor-email-alert` | Emails ADMIN_EMAIL when the app is visited; debounced to 1 email / 10 min | enabled |
 
-## Architectural Decisions (record of non-obvious choices)
+## Architectural Decisions
 
 | Decision | Why |
 |---|---|
-| Frontend controls send delay loop, not backend | Enables real-time per-group status panel in the UI; backend gets `minDelay: 0, maxDelay: 0` |
-| Media sent as base64 JSON (`mediaItems` array) | Avoids a separate upload endpoint and multer dependency; 50 MB Express JSON limit set; supports multiple attachments per send |
-| Text and files sent as separate messages (no caption) | Cleaner multi-attachment UX: each item is independently visible in WhatsApp |
-| `POST /api/disconnect` calls `client.logout()` | Clears the session so a fresh QR appears; `disconnected` event fires → `scheduleReconnect()` → new QR in ~5s |
-| `GET /health` mounted before `app:visited` middleware | Prevents Railway's health-check pings from triggering visitor-alert emails |
-| `loadPlugins()` called inside `app.listen()` callback | Ensures plugins register event listeners only after the server is accepting requests |
-| Plugin paths in `app.config.js` use `path.join(__dirname, …)` | Makes paths absolute so `pluginLoader.js` can `require()` them from any directory |
-| Railway deployment uses `Dockerfile` not Nixpacks | Nixpacks cannot install the Chromium system libraries puppeteer needs on Debian slim |
-| `visitor-email-alert` debounced to 1 email / 10 min | Prevents inbox flood when Railway health checker or crawlers hit the URL repeatedly |
-| `sendAudioAsVoice: true` auto-applied for `audio/*` mimetypes | Detected by both file extension (path) and mimetype (MessageMedia) so voice notes work from both code paths |
+| Frontend controls send delay loop, not backend | Enables real-time per-group status panel in the UI |
+| Media sent as base64 JSON (`mediaItems` array) | Avoids multer dependency; supports multiple attachments |
+| Text and files sent as separate messages | Cleaner multi-attachment UX in WhatsApp |
+| `POST /api/disconnect` calls `client.logout()` | Clears session so fresh QR appears |
+| `GET /health` mounted before `app:visited` middleware | Prevents health-check pings from triggering visitor emails |
+| Railway deployment uses `Dockerfile` not Nixpacks | Nixpacks cannot install Chromium system libraries — **review needed:** Baileys uses native WebSocket (no Puppeteer), so Chromium deps may no longer be needed in the image |
+| `visitor-email-alert` debounced to 1 email / 10 min | Prevents inbox flood from crawlers |
+| Migrated from whatsapp-web.js to Baileys | whatsapp-web.js required Chrome+Puppeteer in the container, causing slow/unreliable group loading on Railway. Baileys connects via native WebSocket — faster, more stable, no browser dependency |
+| Pinned Baileys to 6.7.23, not latest | `latest` resolves to 7.0.0-rc13 (unstable release candidate) which caused WhatsApp to reject the pairing after QR scan |
 
 ## How to Run Locally
 ```bash
 npm install
-npm install --prefix frontend   # install frontend deps
-npm run build                   # build React → frontend/dist/
-npm start                       # serves on http://localhost:3000
+npm install --prefix frontend
+npm run build
+npm start
+# open http://localhost:3000
 ```
 
-Or for live-reload during development:
+## Release Flow
 ```bash
-npm run dev   # concurrently: Express (port 3000) + Vite dev server (port 5173)
+npm run ship:win   # Windows — commit + version bump + push to main
+npm run ship       # Mac/Linux
 ```
-
-## How to Deploy
-See **DEPLOY.md** for the full Railway setup guide.
-
-Summary: push to `main` → Railway builds the Dockerfile → container starts → scan QR at the public URL.
-WhatsApp session is stored at `/data/session` (Railway persistent volume mounted at `/data`).
+Railway auto-deploys on every push to `main`.
 
 ## Environment Variables (.env.example)
 ```

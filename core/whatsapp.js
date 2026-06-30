@@ -1,111 +1,45 @@
 require('dotenv').config();
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const fs   = require('fs');
 const path = require('path');
-const fs = require('fs');
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+} = require('@whiskeysockets/baileys');
 const eventBus = require('./eventBus');
 
-const SESSION_PATH = process.env.SESSION_PATH || './data/session';
+const SESSION_PATH      = process.env.SESSION_PATH || './data/session';
 const RECONNECT_DELAY_MS = 5000;
 
-const AUDIO_EXTENSIONS = new Set(['.mp3', '.ogg', '.wav', '.m4a', '.aac', '.opus']);
-
-let client = null;
-let isReady = false;
-let isInitializing = false;
-let initStartedAt = null;
-let stage = 'disconnected';
+let sock              = null;   // Baileys socket
+let isReady           = false;
+let isInitializing    = false;
+let initStartedAt     = null;
+let stage             = 'disconnected';
 let skipNextReconnect = false;
+let connectedUser     = null;  // { phone, name }
 
-// Groups cache — populated immediately when WhatsApp is ready, before Chrome
-// gets busy with background message sync. Served for all subsequent requests.
-let groupsCache = null;
-let groupsCacheTime = 0;
+let groupsCache       = null;
+let groupsCacheTime   = 0;
 const GROUPS_CACHE_TTL_MS = 5 * 60 * 1000;
-
-// Deduplicates concurrent getGroups() calls during a live fetch.
 let groupsFetchPromise = null;
-
-function buildClient() {
-  return new Client({
-    authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
-    puppeteer: {
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--disable-gpu',
-      ],
-    },
-  });
-}
 
 function scheduleReconnect() {
   console.log(`[whatsapp] reconnecting in ${RECONNECT_DELAY_MS}ms…`);
   setTimeout(initializeClient, RECONNECT_DELAY_MS);
 }
 
-// Fetches groups by polling window.Store.Chat until it's available.
-// If Store never appears (injection failed), triggers a client reinit and throws.
-async function fetchGroupsFromPage() {
-  const POLL_MS = 3000;
-  // If window.Store is still absent after this long, the inject() call failed.
-  const STORE_DEADLINE_MS = 15000;
-  const storeDeadline = Date.now() + STORE_DEADLINE_MS;
+// ── groups ────────────────────────────────────────────────────────────────────
 
-  while (true) {
-    if (!client) throw new Error('client was destroyed during fetch');
-
-    let result;
-    try {
-      result = await client.pupPage.evaluate(() => {
-        if (!window.Store)      return { status: 'no_store' };
-        if (!window.Store.Chat) return { status: 'no_chat' };
-        try {
-          return window.Store.Chat.getModelsArray()
-            .filter(c => c.isGroup)
-            .map(c => ({ id: c.id._serialized, name: c.formattedTitle || c.name || '' }));
-        } catch (e) {
-          return { status: 'error', message: e.message };
-        }
-      });
-    } catch (evalErr) {
-      throw new Error(`page evaluate failed: ${evalErr.message}`);
-    }
-
-    // Success — return the groups array (may be empty if no groups yet)
-    if (Array.isArray(result)) return result;
-
-    if (result.status === 'error') throw new Error(result.message);
-
-    // Store or Chat not initialised yet — check deadline then retry
-    if (Date.now() > storeDeadline) {
-      console.error('[whatsapp] window.Store unavailable after 15 s — injection failed, reinitialising');
-      // Async so this function can throw before the reinit starts
-      setImmediate(async () => {
-        if (isInitializing) return;
-        isReady = false;
-        isInitializing = false;
-        stage = 'disconnected';
-        groupsCache = null;
-        groupsCacheTime = 0;
-        if (client) { try { await client.destroy(); } catch {} client = null; }
-        scheduleReconnect();
-      });
-      throw new Error('WhatsApp injection failed — reinitialising client');
-    }
-
-    console.log(`[whatsapp] ${result.status} — retrying in ${POLL_MS / 1000}s`);
-    await new Promise(r => setTimeout(r, POLL_MS));
-  }
+async function fetchGroups() {
+  if (!sock) throw new Error('WhatsApp client not ready');
+  const groupMap = await sock.groupFetchAllParticipating();
+  return Object.values(groupMap)
+    .filter(g => g.id && g.subject)
+    .map(g => ({ id: g.id, name: g.subject }));
 }
 
-// Pre-warms the groups cache right when WhatsApp is ready, before Chrome
-// starts the heavy background message sync that makes evaluations hang.
-// Routed through getGroups() so it shares the deduplication promise with
-// any concurrent /api/groups requests — only one fetchGroupsFromPage runs.
 async function warmGroupsCache() {
   try {
     console.log('[whatsapp] warming groups cache…');
@@ -116,87 +50,115 @@ async function warmGroupsCache() {
   }
 }
 
+// ── lifecycle ─────────────────────────────────────────────────────────────────
+
 async function initializeClient() {
   if (isInitializing || isReady) return;
   isInitializing = true;
-  initStartedAt = Date.now();
-  stage = 'initializing';
+  initStartedAt  = Date.now();
+  stage          = 'initializing';
 
-  if (client) {
-    try { await client.destroy(); } catch { /* ignore */ }
-    client = null;
-  }
-  client = buildClient();
+  try {
+    fs.mkdirSync(SESSION_PATH, { recursive: true });
 
-  client.on('loading_screen', () => {
-    stage = 'browser_starting';
-  });
+    let logger;
+    try { logger = require('pino')({ level: 'silent' }); } catch {}
 
-  client.on('qr', (qr) => {
-    stage = 'qr_ready';
-    eventBus.emit('whatsapp:qr', { qr });
-  });
+    const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
 
-  client.on('authenticated', () => {
-    stage = 'connecting';
-  });
+    let version;
+    try { ({ version } = await fetchLatestBaileysVersion()); } catch {}
 
-  client.on('ready', () => {
-    isReady = true;
-    isInitializing = false;
-    initStartedAt = null;
-    stage = 'ready';
-    const { wid, pushname } = client.info;
-    eventBus.emit('whatsapp:ready', { phone: wid.user, name: pushname });
-    console.log(`[whatsapp] ready — ${pushname} (${wid.user})`);
+    sock = makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: false,
+      logger,
+      browser: ['WhatsApp Broadcaster', 'Chrome', '1.0.0'],
+    });
 
-    // Warm the cache immediately — Chrome is idlest right at ready time
-    warmGroupsCache();
-  });
+    sock.ev.on('creds.update', saveCreds);
 
-  client.on('auth_failure', (msg) => {
-    console.error('[whatsapp] auth failure:', msg);
-    isReady = false;
-    isInitializing = false;
-    stage = 'disconnected';
-  });
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-  client.on('disconnected', (reason) => {
-    isReady = false;
-    isInitializing = false;
-    stage = 'disconnected';
-    groupsCache = null;
-    groupsCacheTime = 0;
-    eventBus.emit('whatsapp:disconnected', {});
-    console.log('[whatsapp] disconnected:', reason);
-    if (skipNextReconnect) {
-      skipNextReconnect = false;
-      return;
-    }
-    scheduleReconnect();
-  });
+      if (qr) {
+        stage = 'qr_ready';
+        eventBus.emit('whatsapp:qr', { qr });
+        console.log('[whatsapp] QR code ready');
+      }
 
-  client.initialize().catch((err) => {
+      // Brief "connecting" phase between QR scan and session open
+      if (connection === 'connecting' && stage === 'qr_ready') {
+        stage = 'connecting';
+      }
+
+      if (connection === 'open') {
+        const user  = sock.user ?? {};
+        const rawId = user.id ?? '';
+        // Baileys id format: "15551234567:12@s.whatsapp.net"
+        const phone = rawId.split(':')[0].split('@')[0];
+        const name  = user.name || user.notify || '';
+
+        connectedUser  = { phone, name };
+        // Patch .info so api/status.js (which reads client.info.wid.user) works unchanged
+        sock.info = { wid: { user: phone }, pushname: name };
+
+        isReady        = true;
+        isInitializing = false;
+        initStartedAt  = null;
+        stage          = 'ready';
+
+        eventBus.emit('whatsapp:ready', { phone, name });
+        console.log(`[whatsapp] ready — ${name} (${phone})`);
+        warmGroupsCache();
+      }
+
+      if (connection === 'close') {
+        const statusCode    = lastDisconnect?.error?.output?.statusCode;
+        const loggedOut     = statusCode === DisconnectReason.loggedOut;
+        const restartNeeded = statusCode === DisconnectReason.restartRequired;
+
+        isReady        = false;
+        isInitializing = false;
+        initStartedAt  = null;
+        stage          = 'disconnected';
+        connectedUser  = null;
+        groupsCache    = null;
+        groupsCacheTime = 0;
+        sock           = null;
+
+        eventBus.emit('whatsapp:disconnected', {});
+        console.log('[whatsapp] disconnected — code:', statusCode);
+
+        if (skipNextReconnect)  { skipNextReconnect = false; return; }
+        if (loggedOut)          { console.log('[whatsapp] logged out — awaiting new session'); return; }
+        if (restartNeeded)      { console.log('[whatsapp] restart required'); initializeClient(); return; }
+        scheduleReconnect();
+      }
+    });
+
+  } catch (err) {
     console.error('[whatsapp] initialization error:', err.message);
-    isReady = false;
+    isReady        = false;
     isInitializing = false;
+    stage          = 'disconnected';
     scheduleReconnect();
-  });
+  }
 }
 
-// Called by api/disconnect — stops the client without triggering auto-reconnect.
 async function disconnectClient() {
   skipNextReconnect = true;
-  isReady = false;
-  isInitializing = false;
-  stage = 'disconnected';
-  groupsCache = null;
-  groupsCacheTime = 0;
-  if (client) {
-    try { await client.destroy(); } catch { /* ignore */ }
-    client = null;
-  }
+  isReady           = false;
+  isInitializing    = false;
+  stage             = 'disconnected';
+  connectedUser     = null;
+  groupsCache       = null;
+  groupsCacheTime   = 0;
+  if (sock) { try { sock.end(undefined); } catch {} sock = null; }
 }
+
+// ── public API ────────────────────────────────────────────────────────────────
 
 async function getGroups() {
   if (!isReady) throw new Error('WhatsApp client not ready');
@@ -205,12 +167,12 @@ async function getGroups() {
     return groupsCache;
   }
 
-  // Deduplicate: if a live fetch is already running, share its promise
+  // Deduplicate concurrent requests
   if (!groupsFetchPromise) {
-    groupsFetchPromise = fetchGroupsFromPage()
+    groupsFetchPromise = fetchGroups()
       .then(groups => {
-        groupsCache = groups;
-        groupsCacheTime = Date.now();
+        groupsCache        = groups;
+        groupsCacheTime    = Date.now();
         groupsFetchPromise = null;
         return groups;
       })
@@ -223,37 +185,65 @@ async function getGroups() {
   return groupsFetchPromise;
 }
 
-async function sendMessage(groupId, content, extraOpts = {}) {
+async function sendMessage(groupId, content) {
   if (!isReady) throw new Error('WhatsApp client not ready');
 
-  // Pre-built MessageMedia (from base64 upload)
-  if (content instanceof MessageMedia) {
-    const isAudio = content.mimetype?.startsWith('audio/');
-    const opts = isAudio ? { sendAudioAsVoice: true, ...extraOpts } : extraOpts;
-    return client.sendMessage(groupId, content, opts);
+  // File path (legacy — not sent by api/send.js, kept for programmatic use)
+  if (typeof content === 'string' && fs.existsSync(content)) {
+    const buf = fs.readFileSync(content);
+    const ext = path.extname(content).toLowerCase();
+    if (new Set(['.mp3', '.ogg', '.wav', '.m4a', '.aac', '.opus']).has(ext)) {
+      return sock.sendMessage(groupId, { audio: buf, mimetype: 'audio/ogg; codecs=opus', ptt: true });
+    }
+    if (new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']).has(ext)) {
+      return sock.sendMessage(groupId, { image: buf });
+    }
+    if (new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']).has(ext)) {
+      return sock.sendMessage(groupId, { video: buf });
+    }
+    return sock.sendMessage(groupId, { document: buf, fileName: path.basename(content) });
   }
 
   // Plain text
-  const looksLikePath = typeof content === 'string' && fs.existsSync(content);
-  if (!looksLikePath) {
-    return client.sendMessage(groupId, content, extraOpts);
+  if (typeof content === 'string') {
+    return sock.sendMessage(groupId, { text: content });
   }
 
-  // File path
-  const media = MessageMedia.fromFilePath(content);
-  const ext = path.extname(content).toLowerCase();
-  if (AUDIO_EXTENSIONS.has(ext)) {
-    return client.sendMessage(groupId, media, { sendAudioAsVoice: true, ...extraOpts });
+  // MessageMedia-like object: { data (base64), mimetype, filename }
+  // api/send.js creates these via new MessageMedia(mimetype, data, filename)
+  if (content && typeof content.data === 'string' && content.mimetype) {
+    const buf      = Buffer.from(content.data, 'base64');
+    const { mimetype, filename } = content;
+
+    if (mimetype.startsWith('audio/')) {
+      return sock.sendMessage(groupId, { audio: buf, mimetype: 'audio/ogg; codecs=opus', ptt: true });
+    }
+    if (mimetype.startsWith('image/')) return sock.sendMessage(groupId, { image: buf });
+    if (mimetype.startsWith('video/')) return sock.sendMessage(groupId, { video: buf });
+    return sock.sendMessage(groupId, { document: buf, mimetype, fileName: filename || 'file' });
   }
-  return client.sendMessage(groupId, media, extraOpts);
+
+  throw new Error('sendMessage: unsupported content type');
 }
 
-function getClient() { return client; }
-function getIsReady() { return isReady; }
-function getIsInitializing() { return isInitializing; }
+// Returns the Baileys socket, augmented with .info for api/status.js compatibility.
+// api/status.js reads client.info.wid.user and client.info.pushname.
+function getClient()        { return isReady ? sock : null; }
+function getIsReady()       { return isReady; }
+function getIsInitializing(){ return isInitializing; }
 function getInitStartedAt() { return initStartedAt; }
-function getStage() { return stage; }
+function getStage()         { return stage; }
 
 initializeClient();
 
-module.exports = { getGroups, sendMessage, getClient, getIsReady, getIsInitializing, getInitStartedAt, getStage, initializeClient, disconnectClient };
+module.exports = {
+  getGroups,
+  sendMessage,
+  getClient,
+  getIsReady,
+  getIsInitializing,
+  getInitStartedAt,
+  getStage,
+  initializeClient,
+  disconnectClient,
+};

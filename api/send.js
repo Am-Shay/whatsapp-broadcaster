@@ -4,7 +4,6 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const ffmpegPath = require('ffmpeg-static');
-const { MessageMedia } = require('whatsapp-web.js');
 const { sendMessage, getIsReady } = require('../core/whatsapp');
 const eventBus = require('../core/eventBus');
 
@@ -68,7 +67,7 @@ async function broadcastToGroups({ groupIds, message, minDelay, maxDelay, mediaI
           data = await convertToOgg(data);
           mimetype = 'audio/ogg; codecs=opus';
         }
-        const media = new MessageMedia(mimetype, data, filename || 'file');
+        const media = { mimetype, data, filename: filename || 'file' };
         const sent = await sendMessage(groupId, media, {});
         eventBus.emit('message:sent', {
           groupId,
