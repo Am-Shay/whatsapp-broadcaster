@@ -77,12 +77,19 @@ async function initializeClient() {
       browser: ['WhatsApp Broadcaster', 'Chrome', '1.0.0'],
     });
 
+    // Capture reference so stale close events from a previous socket are ignored.
+    // Without this, a delayed close event from the old socket after disconnect
+    // nulls `sock` and corrupts state even after a new socket is already running.
+    const thisSock = sock;
+
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async (update) => {
+      if (thisSock !== sock) return; // superseded socket — ignore
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
+        console.log('[whatsapp] QR generation triggered — emitting whatsapp:qr');
         stage = 'qr_ready';
         eventBus.emit('whatsapp:qr', { qr });
         console.log('[whatsapp] QR code ready');
