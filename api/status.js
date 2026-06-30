@@ -1,5 +1,5 @@
 const express = require('express');
-const { getIsReady, getClient, getInitStartedAt, getStage } = require('../core/whatsapp');
+const { getIsReady, getClient, getInitStartedAt, getStage, initializeClient } = require('../core/whatsapp');
 
 const router = express.Router();
 
@@ -9,6 +9,9 @@ router.get('/', (req, res) => {
   const uptimeSeconds = Math.floor(process.uptime());
 
   if (!connected) {
+    // Drive reconnection from the status poll so QRScreen doesn't need to call
+    // /api/qr first — the isInitializing guard makes this safe on every poll.
+    initializeClient();
     return res.json({
       connected: false,
       stage: getStage(),
