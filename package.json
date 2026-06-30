@@ -14,7 +14,8 @@
     "release:minor": "standard-version --release-as minor",
     "release:major": "standard-version --release-as major",
     "ship": "bash scripts/release.sh",
-    "ship:win": "scripts\\release.bat"
+    "ship:win": "scripts\\release.bat",
+    "promote": "git checkout main && git merge develop && scripts\\release.bat"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.23",

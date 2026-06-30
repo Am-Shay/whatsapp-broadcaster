@@ -182,6 +182,25 @@ SMTP_USER=
 SMTP_PASS=
 ```
 
+## Branching Strategy
+
+| Branch | Purpose | Who deploys from here |
+|---|---|---|
+| `main` | **Production** — live user connected on v2.0.0, Railway deploys from here | Only via `npm run promote` |
+| `develop` | **Active development** — safe to experiment, push freely | `npm run ship:win` (or `npm run ship` on Mac/Linux) |
+
+**Rules:**
+- Never push directly to `main`. All work goes to `develop` first.
+- `npm run ship:win` on `develop` → commits, bumps version, pushes to `develop` only.
+- `npm run ship:win` on `main` → shows a confirmation prompt before touching production.
+- `npm run ship:win` on any other branch → blocked entirely.
+
+**To release to production:**
+```bash
+npm run promote   # merges develop → main, then ships to Railway
+```
+This is the ONLY approved path from develop into production.
+
 ## Adding a New Feature — Checklist
 1. [ ] Classify: is it core (sending WA messages) or a plugin? → almost always a plugin
 2. [ ] Check if the event you need already exists in the table above
