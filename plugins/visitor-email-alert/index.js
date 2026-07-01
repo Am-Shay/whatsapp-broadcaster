@@ -29,28 +29,33 @@ async function sendAlert({ ip, userAgent, timestamp }) {
   if (now - lastSentAt < DEBOUNCE_MS) return;
   lastSentAt = now;
 
-  await getTransporter().sendMail({
-    from: config.emailFrom,
-    to: config.adminEmail,
-    subject: '👀 Someone opened your WhatsApp Broadcaster',
-    text: [
-      'Your app was visited.',
-      '',
-      `Time:       ${formatDate(timestamp)}`,
-      `IP:         ${ip}`,
-      `User-Agent: ${userAgent}`,
-    ].join('\n'),
-    html: `
-      <p>Your WhatsApp Broadcaster was visited.</p>
-      <table cellpadding="6" style="border-collapse:collapse;font-family:monospace">
-        <tr><td><b>Time</b></td><td>${formatDate(timestamp)}</td></tr>
-        <tr><td><b>IP</b></td><td>${ip}</td></tr>
-        <tr><td><b>User-Agent</b></td><td>${userAgent}</td></tr>
-      </table>
-    `,
-  });
+  console.log(`[visitor-email-alert] sending email to ${config.adminEmail}`);
 
-  console.log('[visitor-email-alert] alert sent to', config.adminEmail);
+  try {
+    const info = await getTransporter().sendMail({
+      from: config.emailFrom,
+      to: config.adminEmail,
+      subject: '👀 Someone opened your WhatsApp Broadcaster',
+      text: [
+        'Your app was visited.',
+        '',
+        `Time:       ${formatDate(timestamp)}`,
+        `IP:         ${ip}`,
+        `User-Agent: ${userAgent}`,
+      ].join('\n'),
+      html: `
+        <p>Your WhatsApp Broadcaster was visited.</p>
+        <table cellpadding="6" style="border-collapse:collapse;font-family:monospace">
+          <tr><td><b>Time</b></td><td>${formatDate(timestamp)}</td></tr>
+          <tr><td><b>IP</b></td><td>${ip}</td></tr>
+          <tr><td><b>User-Agent</b></td><td>${userAgent}</td></tr>
+        </table>
+      `,
+    });
+    console.log(`[visitor-email-alert] email sent — messageId: ${info.messageId}`);
+  } catch (err) {
+    console.error(`[visitor-email-alert] email FAILED — ${err.message}`);
+  }
 }
 
 module.exports = {
@@ -70,11 +75,7 @@ module.exports = {
       return;
     }
 
-    eventBus.on('app:visited', (payload) => {
-      sendAlert(payload).catch((err) => {
-        console.error('[visitor-email-alert] failed to send email:', err.message);
-      });
-    });
+    eventBus.on('app:visited', (payload) => { sendAlert(payload); });
 
     console.log('[visitor-email-alert] initialized');
   },
