@@ -9,6 +9,7 @@ const SESSION_PATH = process.env.SESSION_PATH || './data/session';
 // POST /api/disconnect — stops the client and wipes the local session so it
 // does not auto-authenticate on the next initializeClient() call.
 router.post('/', async (req, res) => {
+  console.log('[disconnect] called');
   try {
     await disconnectClient();
     try {
