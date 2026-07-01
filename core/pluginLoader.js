@@ -6,7 +6,7 @@ function loadPlugins() {
 
   for (const entry of appConfig.plugins) {
     if (!entry.enabled) {
-      console.log(`[pluginLoader] skipped (disabled): ${entry.name}`);
+      console.log(`[pluginLoader] ${entry.disabledMessage ?? `skipped (disabled): ${entry.name}`}`);
       continue;
     }
 
