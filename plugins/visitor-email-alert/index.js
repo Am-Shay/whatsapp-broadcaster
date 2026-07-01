@@ -8,10 +8,12 @@ let transporter = null;
 
 function getTransporter() {
   if (!transporter) {
+    const secure = config.smtp.port === 465;
+    console.log(`[visitor-email-alert] creating transporter — host: ${config.smtp.host}, port: ${config.smtp.port}, secure: ${secure} (${secure ? 'SMTPS/TLS' : 'STARTTLS'})`);
     transporter = nodemailer.createTransport({
       host: config.smtp.host,
       port: config.smtp.port,
-      secure: config.smtp.port === 465,
+      secure,
       auth: { user: config.smtp.user, pass: config.smtp.pass },
     });
   }
