@@ -55,6 +55,14 @@ module.exports = {
   name: 'visitor-email-alert',
 
   initialize(eventBus) {
+    console.log('[visitor-email-alert] initialize called — SMTP config:', {
+      host: config.smtp.host || '(not set)',
+      port: config.smtp.port,
+      user: config.smtp.user ? '(set)' : '(not set)',
+      pass: config.smtp.pass ? '(set)' : '(not set)',
+      adminEmail: config.adminEmail || '(not set)',
+    });
+
     if (!config.adminEmail || !config.smtp.user) {
       console.warn('[visitor-email-alert] ADMIN_EMAIL or SMTP_USER not set — plugin disabled');
       return;
