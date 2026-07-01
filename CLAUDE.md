@@ -55,7 +55,11 @@ whatsapp-broadcaster/
 │   └── health.js                    ← GET /health (Railway health check)
 │
 ├── plugins/
-│   └── visitor-email-alert/         ← sends email when someone opens the app link
+│   ├── visitor-email-resend/        ← emails via Resend REST API on visit (active)
+│   │   ├── index.js
+│   │   ├── config.js
+│   │   └── README.md
+│   └── visitor-email-alert-smtp/   ← legacy SMTP version, disabled (kept for reference)
 │       ├── index.js
 │       ├── config.js
 │       └── README.md
@@ -138,7 +142,8 @@ These events are emitted by core. Plugins listen to them — never the other way
 ## Active Plugins
 | Plugin | What it does | Status |
 |---|---|---|
-| `visitor-email-alert` | Emails ADMIN_EMAIL when the app is visited; debounced to 1 email / 10 min | enabled |
+| `visitor-email-resend` | Emails ADMIN_EMAIL via Resend REST API when the app is visited; includes IP geolocation; debounced to 1 email / 10 min | enabled |
+| `visitor-email-alert-smtp` | Legacy SMTP version (nodemailer) — kept for reference | disabled |
 
 ## Architectural Decisions
 
@@ -177,9 +182,12 @@ Railway auto-deploys on every push to `main`.
 PORT=3000
 SESSION_PATH=/data/session
 ADMIN_EMAIL=your@email.com
+RESEND_API_KEY=re_...
+
+# Legacy SMTP vars (visitor-email-alert-smtp plugin, currently disabled)
 EMAIL_FROM=noreply@yourdomain.com
 SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
+SMTP_PORT=465
 SMTP_USER=
 SMTP_PASS=
 ```
