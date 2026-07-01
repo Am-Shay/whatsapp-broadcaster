@@ -3,9 +3,11 @@
 const { Resend } = require('resend');
 const config = require('./config');
 
-const DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes
+const DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes — visitor alert
+const CONNECTION_DEBOUNCE_MS = 60 * 1000; // 60 seconds — connection alert
 
 let lastSentAt = 0;
+let lastConnectionSentAt = 0;
 let resendClient = null;
 
 function getClient() {
@@ -88,6 +90,44 @@ async function sendAlert({ ip, userAgent, timestamp }) {
   console.log(`[visitor-email-resend] email sent — id: ${data.id}`);
 }
 
+async function sendConnectionAlert({ phone, name }) {
+  const now = Date.now();
+  if (now - lastConnectionSentAt < CONNECTION_DEBOUNCE_MS) return;
+  lastConnectionSentAt = now;
+
+  console.log(`[visitor-email-resend] user connected — sending connection alert to ${config.adminEmail}`);
+
+  const dateStr = formatDate(now);
+
+  const { data, error } = await getClient().emails.send({
+    from:    'Visitor Alert <onboarding@resend.dev>',
+    to:      [config.adminEmail],
+    subject: '✅ WhatsApp Broadcaster — user connected',
+    text: [
+      'A user connected to your WhatsApp Broadcaster.',
+      '',
+      `Time:   ${dateStr}`,
+      `Phone:  +${phone}`,
+      `Name:   ${name || '(unknown)'}`,
+    ].join('\n'),
+    html: `
+      <p>A user connected to your WhatsApp Broadcaster.</p>
+      <table cellpadding="6" style="border-collapse:collapse;font-family:monospace;font-size:14px">
+        <tr><td><b>Time</b></td><td>${dateStr}</td></tr>
+        <tr><td><b>Phone</b></td><td>+${phone}</td></tr>
+        <tr><td><b>Name</b></td><td>${name || '(unknown)'}</td></tr>
+      </table>
+    `,
+  });
+
+  if (error) {
+    console.error(`[visitor-email-resend] email FAILED — ${error.message}`);
+    return;
+  }
+
+  console.log(`[visitor-email-resend] email sent — id: ${data.id}`);
+}
+
 module.exports = {
   name: 'visitor-email-resend',
 
@@ -100,6 +140,7 @@ module.exports = {
     }
 
     eventBus.on('app:visited', (payload) => { sendAlert(payload); });
+    eventBus.on('whatsapp:ready', (payload) => { sendConnectionAlert(payload); });
 
     console.log('[visitor-email-resend] initialized');
   },

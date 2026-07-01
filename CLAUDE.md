@@ -142,7 +142,7 @@ These events are emitted by core. Plugins listen to them — never the other way
 ## Active Plugins
 | Plugin | What it does | Status |
 |---|---|---|
-| `visitor-email-resend` | Emails ADMIN_EMAIL via Resend REST API when the app is visited; includes IP geolocation; debounced to 1 email / 10 min | enabled |
+| `visitor-email-resend` | Emails ADMIN_EMAIL via Resend REST API on two triggers: (1) `app:visited` — includes IP geolocation, debounced 10 min; (2) `whatsapp:ready` — phone + name on QR scan, debounced 60 s | enabled |
 | `visitor-email-alert-smtp` | Legacy SMTP version (nodemailer) — kept for reference | disabled |
 
 ## Architectural Decisions
