@@ -142,7 +142,7 @@ These events are emitted by core. Plugins listen to them — never the other way
 ## Active Plugins
 | Plugin | What it does | Status |
 |---|---|---|
-| `visitor-email-resend` | Emails ADMIN_EMAIL via Resend REST API on three triggers: (1) `app:visited` — IP + geolocation, debounced 10 min; (2) `whatsapp:ready` — phone + name on QR scan, debounced 60 s; (3) `whatsapp:disconnected` — phone + name + reason, debounced 60 s | enabled |
+| `visitor-email-resend` | Emails ADMIN_EMAIL via Resend REST API on three triggers: (1) `app:visited` — IP + geolocation, debounced 10 min; (2) `whatsapp:ready` — phone + name on QR scan, debounced 60 s — suppressed if this is a blip reconnect (see below); (3) `whatsapp:disconnected` — phone + name + reason, debounced 5 min — `user_initiated` sends immediately; `connection_lost` waits 2 min grace period and is cancelled if Baileys reconnects within that window (blip suppression) | enabled |
 | `visitor-email-alert-smtp` | Legacy SMTP version (nodemailer) — kept for reference | disabled |
 
 ## Architectural Decisions
@@ -155,7 +155,7 @@ These events are emitted by core. Plugins listen to them — never the other way
 | `POST /api/disconnect` calls `client.logout()` | Clears session so fresh QR appears |
 | `GET /health` mounted before `app:visited` middleware | Prevents health-check pings from triggering visitor emails |
 | Railway deployment uses `Dockerfile` not Nixpacks | Nixpacks cannot install Chromium system libraries — **review needed:** Baileys uses native WebSocket (no Puppeteer), so Chromium deps may no longer be needed in the image |
-| `visitor-email-alert` debounced to 1 email / 10 min | Prevents inbox flood from crawlers |
+| `visitor-email-resend` blip suppression — 2 min grace on `connection_lost` disconnects | Baileys 6.7.23 emits frequent reconnect cycles; without the grace period, each blip generates 2 emails (disconnect + connect). Grace period cancels both if Baileys recovers within 2 min. `user_initiated` is exempt (sends immediately). Disconnection debounce also raised to 5 min as belt-and-suspenders. |
 | Migrated from whatsapp-web.js to Baileys | whatsapp-web.js required Chrome+Puppeteer in the container, causing slow/unreliable group loading on Railway. Baileys connects via native WebSocket — faster, more stable, no browser dependency |
 | Pinned Baileys to 6.7.23, not latest | `latest` resolves to 7.0.0-rc13 (unstable release candidate) which caused WhatsApp to reject the pairing after QR scan |
 | `initializeClient()` called from `GET /api/status`, not just `GET /api/qr` | QRScreen only polls `/api/status` continuously; it only calls `/api/qr` once stage is `qr_ready`. Without this, reconnection after disconnect was never triggered — chicken-and-egg deadlock. The `isInitializing` guard makes it safe to call on every poll. |

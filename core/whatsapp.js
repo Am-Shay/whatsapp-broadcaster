@@ -133,6 +133,7 @@ async function initializeClient() {
         const restartNeeded = statusCode === DisconnectReason.restartRequired;
 
         // Capture before state reset wipes these values
+        const wasReady     = isReady;
         const reason       = disconnectReason ?? 'connection_lost';
         const phone        = lastKnownPhone;
         const disconnName  = lastKnownName;
@@ -146,8 +147,12 @@ async function initializeClient() {
         groupsCacheTime  = 0;
         sock             = null;
         disconnectReason = null;
-        eventBus.emit('whatsapp:disconnected', { phone, name: disconnName, reason });
-        console.log('[whatsapp] disconnected — code:', statusCode, '— reason:', reason);
+        console.log('[whatsapp] disconnected — code:', statusCode, '— reason:', reason, '— wasReady:', wasReady);
+        // Only emit if the session was actually open — skips spurious Baileys
+        // restartRequired closes that fire during the QR handshake before 'open'.
+        if (wasReady || reason === 'user_initiated') {
+          eventBus.emit('whatsapp:disconnected', { phone, name: disconnName, reason });
+        }
 
         if (skipNextReconnect)  { skipNextReconnect = false; return; }
         if (loggedOut)          { console.log('[whatsapp] logged out — awaiting new session'); return; }

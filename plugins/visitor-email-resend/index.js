@@ -4,12 +4,14 @@ const { Resend } = require('resend');
 const config = require('./config');
 
 const DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes — visitor alert
-const CONNECTION_DEBOUNCE_MS    = 60 * 1000; // 60 seconds — connection alert
-const DISCONNECTION_DEBOUNCE_MS = 60 * 1000; // 60 seconds — disconnection alert
+const CONNECTION_DEBOUNCE_MS    = 60 * 1000;      // 60 seconds — connection alert
+const DISCONNECTION_DEBOUNCE_MS = 5 * 60 * 1000;  // 5 minutes  — disconnection alert
+const DISCONNECTION_GRACE_MS    = 2 * 60 * 1000;  // 2 minutes  — blip grace period
 
 let lastSentAt = 0;
 let lastConnectionSentAt = 0;
 let lastDisconnectionSentAt = 0;
+let pendingDisconnectTimer = null; // cancelled if Baileys reconnects within the grace window
 let resendClient = null;
 
 function getClient() {
@@ -53,10 +55,14 @@ async function fetchGeo(ip) {
 
 async function sendAlert({ ip, userAgent, timestamp }) {
   const now = Date.now();
-  if (now - lastSentAt < DEBOUNCE_MS) return;
+  const remaining = DEBOUNCE_MS - (now - lastSentAt);
+  if (remaining > 0) {
+    console.log(`[visitor-email-resend] APP:VISITED debounce active — skipping (${Math.ceil(remaining / 1000)}s remaining)`);
+    return;
+  }
   lastSentAt = now;
 
-  console.log(`[visitor-email-resend] sending email to ${config.adminEmail}`);
+  console.log(`[visitor-email-resend] APP:VISITED calling sendAlert() — sending email to ${config.adminEmail}`);
 
   const geo = await fetchGeo(ip);
   const dateStr = formatDate(timestamp);
@@ -94,10 +100,14 @@ async function sendAlert({ ip, userAgent, timestamp }) {
 
 async function sendConnectionAlert({ phone, name }) {
   const now = Date.now();
-  if (now - lastConnectionSentAt < CONNECTION_DEBOUNCE_MS) return;
+  const remaining = CONNECTION_DEBOUNCE_MS - (now - lastConnectionSentAt);
+  if (remaining > 0) {
+    console.log(`[visitor-email-resend] WHATSAPP:READY debounce active — skipping (${Math.ceil(remaining / 1000)}s remaining)`);
+    return;
+  }
   lastConnectionSentAt = now;
 
-  console.log(`[visitor-email-resend] user connected — sending connection alert to ${config.adminEmail}`);
+  console.log(`[visitor-email-resend] WHATSAPP:READY calling sendConnectionAlert() — sending email to ${config.adminEmail}`);
 
   const dateStr = formatDate(now);
 
@@ -137,11 +147,15 @@ const REASON_LABELS = {
 
 async function sendDisconnectionAlert({ phone, name, reason }) {
   const now = Date.now();
-  if (now - lastDisconnectionSentAt < DISCONNECTION_DEBOUNCE_MS) return;
+  const remaining = DISCONNECTION_DEBOUNCE_MS - (now - lastDisconnectionSentAt);
+  if (remaining > 0) {
+    console.log(`[visitor-email-resend] WHATSAPP:DISCONNECTED debounce active — skipping (${Math.ceil(remaining / 1000)}s remaining)`);
+    return;
+  }
   lastDisconnectionSentAt = now;
 
   const reasonLabel = REASON_LABELS[reason] ?? reason ?? 'Unknown';
-  console.log(`[visitor-email-resend] disconnection detected — sending alert to ${config.adminEmail}, reason: ${reason}`);
+  console.log(`[visitor-email-resend] WHATSAPP:DISCONNECTED calling sendDisconnectionAlert() — reason: ${reason}`);
 
   const dateStr = formatDate(now);
 
@@ -187,14 +201,49 @@ module.exports = {
       return;
     }
 
-    eventBus.on('app:visited',         (payload) => { sendAlert(payload); });
-    eventBus.on('whatsapp:ready',       (payload) => { sendConnectionAlert(payload); });
-    eventBus.on('whatsapp:disconnected',(payload) => { sendDisconnectionAlert(payload); });
+    eventBus.on('app:visited', (payload) => {
+      console.log('[visitor-email-resend] APP:VISITED handler fired');
+      sendAlert(payload);
+    });
+
+    eventBus.on('whatsapp:disconnected', (payload) => {
+      console.log('[visitor-email-resend] WHATSAPP:DISCONNECTED handler fired — payload:', JSON.stringify(payload));
+
+      if (payload.reason === 'user_initiated') {
+        // Explicit logout — send immediately, no auto-reconnect expected
+        sendDisconnectionAlert(payload);
+        return;
+      }
+
+      // Connection blip — wait before sending; cancel if Baileys reconnects first
+      if (pendingDisconnectTimer) clearTimeout(pendingDisconnectTimer);
+      pendingDisconnectTimer = setTimeout(() => {
+        pendingDisconnectTimer = null;
+        console.log('[visitor-email-resend] WHATSAPP:DISCONNECTED grace period elapsed — sending disconnect email');
+        sendDisconnectionAlert(payload);
+      }, DISCONNECTION_GRACE_MS);
+      console.log(`[visitor-email-resend] WHATSAPP:DISCONNECTED grace period started — will email in ${DISCONNECTION_GRACE_MS / 1000}s if no reconnect`);
+    });
+
+    eventBus.on('whatsapp:ready', (payload) => {
+      console.log('[visitor-email-resend] WHATSAPP:READY handler fired');
+
+      if (pendingDisconnectTimer) {
+        // Reconnected within the grace period — this is a blip, suppress both emails
+        clearTimeout(pendingDisconnectTimer);
+        pendingDisconnectTimer = null;
+        console.log('[visitor-email-resend] WHATSAPP:READY blip reconnect — suppressing both disconnect and connect emails');
+        return;
+      }
+
+      sendConnectionAlert(payload);
+    });
 
     console.log('[visitor-email-resend] initialized');
   },
 
   teardown() {
+    if (pendingDisconnectTimer) { clearTimeout(pendingDisconnectTimer); pendingDisconnectTimer = null; }
     resendClient = null;
   },
 };
