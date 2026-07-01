@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-broadcaster",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "WhatsApp Group Broadcaster",
   "main": "core/server.js",
   "scripts": {
