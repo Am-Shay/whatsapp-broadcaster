@@ -131,7 +131,7 @@ These events are emitted by core. Plugins listen to them — never the other way
 | Export | Signature | Notes |
 |---|---|---|
 | `getGroups()` | `async () → [{id, name}]` | Throws if not ready |
-| `sendMessage()` | `async (groupId, content, opts?) → Message` | content = string or MessageMedia |
+| `sendMessage()` | `async (groupId, content, opts?) → Message` | content = string or `{ data, mimetype, filename }` plain object |
 | `getClient()` | `() → Client or null` | Raw Baileys socket |
 | `getIsReady()` | `() → bool` | True after QR is scanned |
 
@@ -153,6 +153,8 @@ These events are emitted by core. Plugins listen to them — never the other way
 | `visitor-email-alert` debounced to 1 email / 10 min | Prevents inbox flood from crawlers |
 | Migrated from whatsapp-web.js to Baileys | whatsapp-web.js required Chrome+Puppeteer in the container, causing slow/unreliable group loading on Railway. Baileys connects via native WebSocket — faster, more stable, no browser dependency |
 | Pinned Baileys to 6.7.23, not latest | `latest` resolves to 7.0.0-rc13 (unstable release candidate) which caused WhatsApp to reject the pairing after QR scan |
+| `initializeClient()` called from `GET /api/status`, not just `GET /api/qr` | QRScreen only polls `/api/status` continuously; it only calls `/api/qr` once stage is `qr_ready`. Without this, reconnection after disconnect was never triggered — chicken-and-egg deadlock. The `isInitializing` guard makes it safe to call on every poll. |
+| `connection.update` handler guards against stale close events (`thisSock !== sock`) | After disconnect, the old socket's `close` event fires asynchronously and can arrive after a new socket is already created. Without the guard it nulls the new socket and sets `isInitializing = false`, permanently preventing QR generation. |
 
 ## How to Run Locally
 ```bash
