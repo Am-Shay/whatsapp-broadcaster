@@ -19,6 +19,9 @@ let initStartedAt     = null;
 let stage             = 'disconnected';
 let skipNextReconnect = false;
 let connectedUser     = null;  // { phone, name }
+let lastKnownPhone    = null;
+let lastKnownName     = null;
+let disconnectReason  = null;  // 'user_initiated' | 'connection_lost'
 
 let groupsCache       = null;
 let groupsCacheTime   = 0;
@@ -108,6 +111,9 @@ async function initializeClient() {
         const name  = user.name || user.notify || '';
 
         connectedUser  = { phone, name };
+        lastKnownPhone = phone;
+        lastKnownName  = name;
+        disconnectReason = null;
         // Patch .info so api/status.js (which reads client.info.wid.user) works unchanged
         sock.info = { wid: { user: phone }, pushname: name };
 
@@ -126,17 +132,22 @@ async function initializeClient() {
         const loggedOut     = statusCode === DisconnectReason.loggedOut;
         const restartNeeded = statusCode === DisconnectReason.restartRequired;
 
-        isReady        = false;
-        isInitializing = false;
-        initStartedAt  = null;
-        stage          = 'disconnected';
-        connectedUser  = null;
-        groupsCache    = null;
-        groupsCacheTime = 0;
-        sock           = null;
+        // Capture before state reset wipes these values
+        const reason       = disconnectReason ?? 'connection_lost';
+        const phone        = lastKnownPhone;
+        const disconnName  = lastKnownName;
 
-        eventBus.emit('whatsapp:disconnected', {});
-        console.log('[whatsapp] disconnected — code:', statusCode);
+        isReady          = false;
+        isInitializing   = false;
+        initStartedAt    = null;
+        stage            = 'disconnected';
+        connectedUser    = null;
+        groupsCache      = null;
+        groupsCacheTime  = 0;
+        sock             = null;
+        disconnectReason = null;
+        eventBus.emit('whatsapp:disconnected', { phone, name: disconnName, reason });
+        console.log('[whatsapp] disconnected — code:', statusCode, '— reason:', reason);
 
         if (skipNextReconnect)  { skipNextReconnect = false; return; }
         if (loggedOut)          { console.log('[whatsapp] logged out — awaiting new session'); return; }
@@ -155,6 +166,7 @@ async function initializeClient() {
 }
 
 async function disconnectClient() {
+  disconnectReason  = 'user_initiated';
   skipNextReconnect = true;
   isReady           = false;
   isInitializing    = false;

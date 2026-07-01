@@ -4,10 +4,12 @@ const { Resend } = require('resend');
 const config = require('./config');
 
 const DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes — visitor alert
-const CONNECTION_DEBOUNCE_MS = 60 * 1000; // 60 seconds — connection alert
+const CONNECTION_DEBOUNCE_MS    = 60 * 1000; // 60 seconds — connection alert
+const DISCONNECTION_DEBOUNCE_MS = 60 * 1000; // 60 seconds — disconnection alert
 
 let lastSentAt = 0;
 let lastConnectionSentAt = 0;
+let lastDisconnectionSentAt = 0;
 let resendClient = null;
 
 function getClient() {
@@ -128,6 +130,52 @@ async function sendConnectionAlert({ phone, name }) {
   console.log(`[visitor-email-resend] email sent — id: ${data.id}`);
 }
 
+const REASON_LABELS = {
+  user_initiated: 'User initiated (Disconnect button)',
+  connection_lost: 'Connection lost (unexpected)',
+};
+
+async function sendDisconnectionAlert({ phone, name, reason }) {
+  const now = Date.now();
+  if (now - lastDisconnectionSentAt < DISCONNECTION_DEBOUNCE_MS) return;
+  lastDisconnectionSentAt = now;
+
+  const reasonLabel = REASON_LABELS[reason] ?? reason ?? 'Unknown';
+  console.log(`[visitor-email-resend] disconnection detected — sending alert to ${config.adminEmail}, reason: ${reason}`);
+
+  const dateStr = formatDate(now);
+
+  const { data, error } = await getClient().emails.send({
+    from:    'Visitor Alert <onboarding@resend.dev>',
+    to:      [config.adminEmail],
+    subject: '⚠️ WhatsApp Broadcaster — user disconnected',
+    text: [
+      'A user disconnected from your WhatsApp Broadcaster.',
+      '',
+      `Time:    ${dateStr}`,
+      `Phone:   ${phone ? `+${phone}` : 'Unknown'}`,
+      `Name:    ${name || 'Unknown'}`,
+      `Reason:  ${reasonLabel}`,
+    ].join('\n'),
+    html: `
+      <p>A user disconnected from your WhatsApp Broadcaster.</p>
+      <table cellpadding="6" style="border-collapse:collapse;font-family:monospace;font-size:14px">
+        <tr><td><b>Time</b></td><td>${dateStr}</td></tr>
+        <tr><td><b>Phone</b></td><td>${phone ? `+${phone}` : 'Unknown'}</td></tr>
+        <tr><td><b>Name</b></td><td>${name || 'Unknown'}</td></tr>
+        <tr><td><b>Reason</b></td><td>${reasonLabel}</td></tr>
+      </table>
+    `,
+  });
+
+  if (error) {
+    console.error(`[visitor-email-resend] email FAILED — ${error.message}`);
+    return;
+  }
+
+  console.log(`[visitor-email-resend] email sent — id: ${data.id}`);
+}
+
 module.exports = {
   name: 'visitor-email-resend',
 
@@ -139,8 +187,9 @@ module.exports = {
       return;
     }
 
-    eventBus.on('app:visited', (payload) => { sendAlert(payload); });
-    eventBus.on('whatsapp:ready', (payload) => { sendConnectionAlert(payload); });
+    eventBus.on('app:visited',         (payload) => { sendAlert(payload); });
+    eventBus.on('whatsapp:ready',       (payload) => { sendConnectionAlert(payload); });
+    eventBus.on('whatsapp:disconnected',(payload) => { sendDisconnectionAlert(payload); });
 
     console.log('[visitor-email-resend] initialized');
   },

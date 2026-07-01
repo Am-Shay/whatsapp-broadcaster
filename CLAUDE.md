@@ -100,7 +100,7 @@ These events are emitted by core. Plugins listen to them — never the other way
 | `app:visited` | `{ ip, userAgent, timestamp }` | Any request hits the app |
 | `whatsapp:qr` | `{ qr }` | New QR code generated |
 | `whatsapp:ready` | `{ phone, name }` | QR scanned, session ready |
-| `whatsapp:disconnected` | `{}` | Session lost |
+| `whatsapp:disconnected` | `{ phone, name, reason }` | Session lost — `reason` is `'user_initiated'` (Disconnect button) or `'connection_lost'` (unexpected drop) |
 | `message:sent` | `{ groupId, groupName, type, timestamp }` | Message sent successfully |
 | `message:failed` | `{ groupId, error, retryCount }` | Send failed |
 
@@ -142,7 +142,7 @@ These events are emitted by core. Plugins listen to them — never the other way
 ## Active Plugins
 | Plugin | What it does | Status |
 |---|---|---|
-| `visitor-email-resend` | Emails ADMIN_EMAIL via Resend REST API on two triggers: (1) `app:visited` — includes IP geolocation, debounced 10 min; (2) `whatsapp:ready` — phone + name on QR scan, debounced 60 s | enabled |
+| `visitor-email-resend` | Emails ADMIN_EMAIL via Resend REST API on three triggers: (1) `app:visited` — IP + geolocation, debounced 10 min; (2) `whatsapp:ready` — phone + name on QR scan, debounced 60 s; (3) `whatsapp:disconnected` — phone + name + reason, debounced 60 s | enabled |
 | `visitor-email-alert-smtp` | Legacy SMTP version (nodemailer) — kept for reference | disabled |
 
 ## Architectural Decisions
